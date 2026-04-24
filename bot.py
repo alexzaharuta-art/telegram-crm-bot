@@ -2,7 +2,7 @@
 """
 RetailCRM Telegram Bot - Українська версія
 Повнофункціональна CRM система для управління магазином
-Розгорнуто на Railway з webhook підтримкою
+Розгорнуто на Railway з FastAPI webhook
 """
 
 import os
@@ -12,8 +12,10 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 from telegram.error import TelegramError
-import requests
-from io import BytesIO
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import uvicorn
+import asyncio
 
 # Налаштування логування
 logging.basicConfig(
@@ -26,8 +28,8 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8747572018:AAFEFoum-bcnSCCTuEwJkKBow9tR0DfcIc0")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-project.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-key")
-PORT = int(os.getenv("PORT", 8080))
-RAILWAY_STATIC_URL = os.getenv("RAILWAY_STATIC_URL", "")
+PORT = int(os.getenv("PORT", 8000))
+WEBHOOK_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
 
 # Дані для демонстрації (локальне сховище)
 USERS_DB = {
@@ -65,7 +67,12 @@ OPERATION_HISTORY = []
 (MENU, ADD_CUSTOMER, ADD_SALE, VIEW_INVENTORY, VIEW_SALES, CALC_SALARY, 
  CUSTOMER_NAME, CUSTOMER_PHONE, CUSTOMER_CITY, SALE_CUSTOMER, SALE_PRODUCT, SALE_QUANTITY) = range(12)
 
-# Функції для роботи з даними
+# FastAPI app
+app = FastAPI()
+
+# Telegram application (глобальна)
+application = None
+
 def log_operation(user_email: str, operation: str, details: str):
     """Записує операцію в історію"""
     OPERATION_HISTORY.append({
@@ -135,7 +142,6 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     elif text == "💰 Зарплата":
         salary_info = "💰 Розрахунок зарплати (квітень 2026):\n\n"
         for email, user_data in USERS_DB.items():
-            # Підраховуємо продажі користувача
             user_sales = sum(s["amount_usd"] for s in SALES_DB if s["seller_email"] == email)
             commission = (user_sales * user_data["commission"]) / 100
             total = user_data["salary_base"] + commission
@@ -214,7 +220,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(products_text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data == "profile":
-        user_email = "david@company.com"  # Для демонстрації
+        user_email = "david@company.com"
         if user_email in USERS_DB:
             user_data = USERS_DB[user_email]
             profile_text = f"👤 Мій профіль:\n\n"
@@ -259,48 +265,65 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     """Обробка помилок"""
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
-async def post_init(app: Application) -> None:
-    """Налаштування webhook після запуску"""
+@app.post("/webhook")
+async def webhook(request: Request):
+    """Webhook для отримання оновлень від Telegram"""
     try:
-        # Отримуємо публічний URL з Railway
-        if RAILWAY_STATIC_URL:
-            webhook_url = f"{RAILWAY_STATIC_URL}/webhook"
-        else:
-            # Якщо RAILWAY_STATIC_URL не встановлено, використовуємо polling
-            logger.info("RAILWAY_STATIC_URL не встановлено, використовуємо polling")
-            return
-        
-        # Встановлюємо webhook
-        await app.bot.set_webhook(webhook_url)
-        logger.info(f"Webhook встановлено: {webhook_url}")
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return JSONResponse({"ok": True})
     except Exception as e:
-        logger.error(f"Помилка при встановленні webhook: {e}")
+        logger.error(f"Webhook error: {e}")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-def main():
-    """Запуск бота"""
-    app = Application.builder().token(BOT_TOKEN).build()
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    return {"status": "ok", "bot": "running"}
+
+@app.on_event("startup")
+async def startup():
+    """Запуск бота при старті FastAPI"""
+    global application
+    
+    application = Application.builder().token(BOT_TOKEN).build()
     
     # Обробники команд
-    app.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("start", start))
     
     # Обробник текстових повідомлень
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
     
     # Обробник кнопок
-    app.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(CallbackQueryHandler(button_callback))
     
     # Обробник помилок
-    app.add_error_handler(error_handler)
+    application.add_error_handler(error_handler)
     
-    # Post-init для webhook
-    app.post_init = post_init
+    # Запуск Application
+    await application.initialize()
+    await application.start()
     
-    # Запуск бота
-    print("🤖 RetailCRM Telegram Bot запущено...")
-    print(f"📱 Бот готовий до роботи!")
+    # Встановлення webhook
+    if WEBHOOK_URL:
+        webhook_url = f"https://{WEBHOOK_URL}/webhook"
+        await application.bot.set_webhook(webhook_url)
+        logger.info(f"✅ Webhook встановлено: {webhook_url}")
+    else:
+        logger.info("⚠️ RAILWAY_PUBLIC_DOMAIN не встановлено, використовуємо polling")
+        # Запуск polling в фоновому потоці
+        asyncio.create_task(application.updater.start_polling(allowed_updates=Update.ALL_TYPES))
     
-    # Використовуємо polling (простіше для Railway)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("🤖 RetailCRM Telegram Bot запущено!")
 
-if __name__ == '__main__':
-    main()
+@app.on_event("shutdown")
+async def shutdown():
+    """Зупинка бота при завершенні FastAPI"""
+    global application
+    if application:
+        await application.stop()
+        await application.shutdown()
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

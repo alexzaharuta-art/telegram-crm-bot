@@ -9,14 +9,12 @@ import json
 import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
-from telegram.error import TelegramError
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 import asyncio
 from google_sheets_integration import init_sheets_manager, get_sheets_manager
-import uuid
 
 # Налаштування логування
 logging.basicConfig(
@@ -32,7 +30,7 @@ WEBHOOK_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
 GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "1D7jcMc-xDzdd1r5rFYlsNrYeSblwmK-HDgvjIstOsK4")
 GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
 
-# Дані для демонстрації
+# Дані
 USERS_DB = {
     "david@company.com": {"name": "Давид Джонсон", "role": "менеджер", "salary_base": 500, "commission": 5},
     "sarah@company.com": {"name": "Сара Уільямс", "role": "керівник", "salary_base": 800, "commission": 3},
@@ -43,11 +41,6 @@ USERS_DB = {
 CUSTOMERS_DB = []
 PRODUCTS_DB = []
 SALES_DB = []
-
-# Стани для ConversationHandler
-(MENU, ADD_CUSTOMER_NAME, ADD_CUSTOMER_EMAIL, ADD_CUSTOMER_PHONE, ADD_CUSTOMER_CITY,
- ADD_PRODUCT_NAME, ADD_PRODUCT_PRICE_USD, ADD_PRODUCT_STOCK,
- ADD_SALE_PRODUCT, ADD_SALE_QUANTITY) = range(10)
 
 # FastAPI app
 app = FastAPI()
@@ -63,7 +56,7 @@ def get_main_menu_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /start"""
     user = update.effective_user
     await update.message.reply_text(
@@ -72,15 +65,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         f"Оберіть дію:",
         reply_markup=get_main_menu_keyboard()
     )
-    return MENU
 
-async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обробка вибору з меню"""
     text = update.message.text
     
     if text == "👥 Клієнти":
         keyboard = [
-            [InlineKeyboardButton("➕ Додати клієнта", callback_data="add_customer")],
+            [InlineKeyboardButton("➕ Додати клієнта", callback_data="add_customer_form")],
             [InlineKeyboardButton("📋 Список клієнтів", callback_data="list_customers")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]
         ]
@@ -88,7 +80,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     
     elif text == "🛍️ Продажі":
         keyboard = [
-            [InlineKeyboardButton("➕ Нова продаж", callback_data="add_sale")],
+            [InlineKeyboardButton("➕ Нова продаж", callback_data="add_sale_form")],
             [InlineKeyboardButton("📊 Мої продажі", callback_data="my_sales")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]
         ]
@@ -96,13 +88,14 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     
     elif text == "📦 Товари":
         keyboard = [
-            [InlineKeyboardButton("➕ Додати товар", callback_data="add_product")],
+            [InlineKeyboardButton("➕ Додати товар", callback_data="add_product_form")],
             [InlineKeyboardButton("📋 Список товарів", callback_data="list_products")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]
         ]
         await update.message.reply_text("📦 Управління товарами:", reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif text == "💰 Зарплата":
+        reload_sales()
         salary_info = "💰 Розрахунок зарплати (квітень 2026):\n\n"
         for email, user_data in USERS_DB.items():
             user_sales = sum(float(s.get("Цена USD", 0)) * int(s.get("Количество", 1)) 
@@ -119,6 +112,10 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text(salary_info, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif text == "📊 Звіти":
+        reload_sales()
+        reload_customers()
+        reload_products()
+        
         total_sales = len(SALES_DB)
         total_revenue = sum(float(s.get("Цена USD", 0)) * int(s.get("Количество", 1)) for s in SALES_DB)
         
@@ -138,16 +135,61 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             [InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]
         ]
         await update.message.reply_text("⚙️ Налаштування:", reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    return MENU
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обробка кнопок"""
     query = update.callback_query
     await query.answer()
     
     if query.data == "back_menu":
         await query.message.reply_text("Оберіть дію:", reply_markup=get_main_menu_keyboard())
+    
+    elif query.data == "add_customer_form":
+        await query.edit_message_text(
+            "📝 Введіть дані клієнта в форматі:\n\n"
+            "<b>Ім'я | Email | Телефон | Місто</b>\n\n"
+            "Приклад:\n"
+            "Іван Петров | ivan@example.com | +380-50-1234567 | Київ"
+        )
+        context.user_data["waiting_for"] = "customer"
+    
+    elif query.data == "add_product_form":
+        await query.edit_message_text(
+            "📝 Введіть дані товара в форматі:\n\n"
+            "<b>Назва | Ціна USD | Запас</b>\n\n"
+            "Приклад:\n"
+            "iPhone 16 Pro | 1280 | 10"
+        )
+        context.user_data["waiting_for"] = "product"
+    
+    elif query.data == "add_sale_form":
+        reload_products()
+        if not PRODUCTS_DB:
+            await query.edit_message_text("❌ Товарів немає. Спочатку додайте товари!")
+            return
+        
+        products_text = "🛍️ Оберіть товар:\n\n"
+        keyboard = []
+        for i, product in enumerate(PRODUCTS_DB):
+            name = product.get("Название", "N/A")
+            price = product.get("Цена USD", 0)
+            products_text += f"{i+1}. {name} - ${price}\n"
+            keyboard.append([InlineKeyboardButton(f"{i+1}. {name}", callback_data=f"select_product_{i}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_menu")])
+        await query.edit_message_text(products_text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    elif query.data.startswith("select_product_"):
+        product_idx = int(query.data.split("_")[2])
+        if product_idx < len(PRODUCTS_DB):
+            product = PRODUCTS_DB[product_idx]
+            await query.edit_message_text(
+                f"📝 Введіть кількість для товара:\n\n"
+                f"<b>{product.get('Название', 'N/A')}</b>\n"
+                f"Ціна: ${product.get('Цена USD', 0)}"
+            )
+            context.user_data["waiting_for"] = "sale_quantity"
+            context.user_data["selected_product_idx"] = product_idx
     
     elif query.data == "list_customers":
         reload_customers()
@@ -165,10 +207,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
         await query.edit_message_text(customers_text, reply_markup=InlineKeyboardMarkup(keyboard))
     
-    elif query.data == "add_customer":
-        await query.edit_message_text("Введіть ім'я клієнта:")
-        return ADD_CUSTOMER_NAME
-    
     elif query.data == "list_products":
         reload_products()
         products_text = "📦 Список товарів:\n\n"
@@ -182,26 +220,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             products_text = "📦 Товарів немає"
         
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
-        await query.edit_message_text(products_text, reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    elif query.data == "add_product":
-        await query.edit_message_text("Введіть назву товара:")
-        return ADD_PRODUCT_NAME
-    
-    elif query.data == "add_sale":
-        reload_products()
-        products_text = "🛍️ Оберіть товар:\n\n"
-        keyboard = []
-        if PRODUCTS_DB:
-            for product in PRODUCTS_DB:
-                name = product.get("Название", "N/A")
-                price = product.get("Цена USD", 0)
-                products_text += f"{name} - ${price}\n"
-                keyboard.append([InlineKeyboardButton(name, callback_data=f"product_{product.get('ID', 'unknown')}")])
-        else:
-            products_text = "🛍️ Товарів немає"
-        
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_menu")])
         await query.edit_message_text(products_text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data == "profile":
@@ -218,195 +236,145 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reload_products()
         reload_sales()
         await query.edit_message_text("✅ Дані оновлені з Google Sheets!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]))
+
+async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обробка текстового вводу для форм"""
+    text = update.message.text
     
-    elif query.data.startswith("product_"):
-        product_id = query.data.split("_")[1]
-        product = next((p for p in PRODUCTS_DB if p.get("ID") == product_id), None)
-        
-        if product:
-            await query.edit_message_text(
-                f"Ви вибрали: {product.get('Название', 'N/A')}\n"
-                f"Ціна: ${product.get('Цена USD', 0)}\n\n"
-                f"Введіть кількість:"
+    waiting_for = context.user_data.get("waiting_for")
+    
+    if waiting_for == "customer":
+        try:
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) != 4:
+                await update.message.reply_text("❌ Невірний формат! Використовуйте: Ім'я | Email | Телефон | Місто")
+                return
+            
+            name, email, phone, city = parts
+            customer_id = f"C{len(CUSTOMERS_DB) + 1:03d}"
+            
+            # Записуємо в Google Sheets
+            if sheets_manager:
+                sheets_manager.add_customer(customer_id, name, email, phone, city)
+                logger.info(f"✅ Клієнт додан: {name}")
+            
+            # Перезавантажуємо дані
+            reload_customers()
+            
+            await update.message.reply_text(
+                f"✅ Клієнт додан!\n\n"
+                f"Ім'я: {name}\n"
+                f"Email: {email}\n"
+                f"Телефон: {phone}\n"
+                f"Місто: {city}",
+                reply_markup=get_main_menu_keyboard()
             )
-            context.user_data["selected_product"] = product
-            return ADD_SALE_QUANTITY
+            context.user_data["waiting_for"] = None
+        except Exception as e:
+            logger.error(f"Error adding customer: {e}")
+            await update.message.reply_text(f"❌ Помилка: {str(e)}")
     
-    return MENU
-
-async def add_customer_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримання імені клієнта"""
-    context.user_data["customer_name"] = update.message.text
-    await update.message.reply_text("Введіть email клієнта:")
-    return ADD_CUSTOMER_EMAIL
-
-async def add_customer_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримання email клієнта"""
-    context.user_data["customer_email"] = update.message.text
-    await update.message.reply_text("Введіть телефон клієнта:")
-    return ADD_CUSTOMER_PHONE
-
-async def add_customer_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримання телефону клієнта"""
-    context.user_data["customer_phone"] = update.message.text
-    await update.message.reply_text("Введіть місто клієнта:")
-    return ADD_CUSTOMER_CITY
-
-async def add_customer_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримання міста клієнта і збереження"""
-    customer_id = f"C{len(CUSTOMERS_DB) + 1:03d}"
-    customer = {
-        "ID": customer_id,
-        "Имя": context.user_data["customer_name"],
-        "Email": context.user_data["customer_email"],
-        "Телефон": context.user_data["customer_phone"],
-        "Город": update.message.text,
-        "Дата добавления": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    
-    # Додаємо в локальну БД
-    CUSTOMERS_DB.append(customer)
-    
-    # Записуємо в Google Sheets
-    if sheets_manager:
-        sheets_manager.add_customer(
-            customer_id,
-            customer["Имя"],
-            customer["Email"],
-            customer["Телефон"],
-            customer["Город"]
-        )
-    
-    await update.message.reply_text(
-        f"✅ Клієнт додан!\n\n"
-        f"Ім'я: {customer['Имя']}\n"
-        f"Email: {customer['Email']}\n"
-        f"Телефон: {customer['Телефон']}\n"
-        f"Місто: {customer['Город']}",
-        reply_markup=get_main_menu_keyboard()
-    )
-    return MENU
-
-async def add_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримання назви товара"""
-    context.user_data["product_name"] = update.message.text
-    await update.message.reply_text("Введіть ціну товара (USD):")
-    return ADD_PRODUCT_PRICE_USD
-
-async def add_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримання ціни товара"""
-    try:
-        context.user_data["product_price"] = float(update.message.text)
-        await update.message.reply_text("Введіть запас товара (кількість):")
-        return ADD_PRODUCT_STOCK
-    except ValueError:
-        await update.message.reply_text("❌ Невірна ціна. Введіть число:")
-        return ADD_PRODUCT_PRICE_USD
-
-async def add_product_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримання запасу товара і збереження"""
-    try:
-        product_id = f"P{len(PRODUCTS_DB) + 1:03d}"
-        product = {
-            "ID": product_id,
-            "Название": context.user_data["product_name"],
-            "Цена USD": context.user_data["product_price"],
-            "Цена UAH": context.user_data["product_price"] * 40,  # Примерно
-            "Запас": int(update.message.text),
-            "Минимум": 5,
-            "Статус": "✅ OK"
-        }
-        
-        # Додаємо в локальну БД
-        PRODUCTS_DB.append(product)
-        
-        # Записуємо в Google Sheets (якщо є функція)
-        if sheets_manager:
-            # Додаємо товар в таблицю
-            worksheet = sheets_manager.get_worksheet("Товары")
-            if worksheet:
-                row = [
-                    product["ID"],
-                    product["Название"],
-                    product["Цена USD"],
-                    product["Цена UAH"],
-                    product["Запас"],
-                    product["Минимум"],
-                    product["Статус"]
-                ]
-                worksheet.append_row(row)
-        
-        await update.message.reply_text(
-            f"✅ Товар додан!\n\n"
-            f"Назва: {product['Название']}\n"
-            f"Ціна: ${product['Цена USD']}\n"
-            f"Запас: {product['Запас']} шт.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return MENU
-    except ValueError:
-        await update.message.reply_text("❌ Невірна кількість. Введіть число:")
-        return ADD_PRODUCT_STOCK
-
-async def add_sale_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримання кількості для продажу і збереження"""
-    try:
-        product = context.user_data["selected_product"]
-        quantity = int(update.message.text)
-        
-        sale_id = f"S{len(SALES_DB) + 1:03d}"
-        sale = {
-            "ID": sale_id,
-            "Дата": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Товар": product.get("Название", "N/A"),
-            "Количество": quantity,
-            "Цена USD": product.get("Цена USD", 0),
-            "Продавец": "Давид Джонсон",
-            "Статус": "✅ Завершено"
-        }
-        
-        # Додаємо в локальну БД
-        SALES_DB.append(sale)
-        
-        # Записуємо в Google Sheets
-        if sheets_manager:
-            sheets_manager.add_sale(
-                sale_id,
-                sale["Товар"],
-                quantity,
-                sale["Цена USD"],
-                sale["Продавец"]
+    elif waiting_for == "product":
+        try:
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) != 3:
+                await update.message.reply_text("❌ Невірний формат! Використовуйте: Назва | Ціна USD | Запас")
+                return
+            
+            name, price_str, stock_str = parts
+            price = float(price_str)
+            stock = int(stock_str)
+            product_id = f"P{len(PRODUCTS_DB) + 1:03d}"
+            
+            # Записуємо в Google Sheets
+            if sheets_manager:
+                worksheet = sheets_manager.get_worksheet("Товары")
+                if worksheet:
+                    row = [product_id, name, price, price * 40, stock, 5, "✅ OK"]
+                    worksheet.append_row(row)
+                    logger.info(f"✅ Товар додан: {name}")
+            
+            # Перезавантажуємо дані
+            reload_products()
+            
+            await update.message.reply_text(
+                f"✅ Товар додан!\n\n"
+                f"Назва: {name}\n"
+                f"Ціна: ${price}\n"
+                f"Запас: {stock} шт.",
+                reply_markup=get_main_menu_keyboard()
             )
-        
-        await update.message.reply_text(
-            f"✅ Продаж додана!\n\n"
-            f"Товар: {sale['Товар']}\n"
-            f"Кількість: {quantity}\n"
-            f"Сума: ${sale['Цена USD'] * quantity}",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return MENU
-    except ValueError:
-        await update.message.reply_text("❌ Невірна кількість. Введіть число:")
-        return ADD_SALE_QUANTITY
+            context.user_data["waiting_for"] = None
+        except Exception as e:
+            logger.error(f"Error adding product: {e}")
+            await update.message.reply_text(f"❌ Помилка: {str(e)}")
+    
+    elif waiting_for == "sale_quantity":
+        try:
+            quantity = int(text)
+            product_idx = context.user_data.get("selected_product_idx")
+            
+            if product_idx is None or product_idx >= len(PRODUCTS_DB):
+                await update.message.reply_text("❌ Товар не знайдений!")
+                return
+            
+            product = PRODUCTS_DB[product_idx]
+            sale_id = f"S{len(SALES_DB) + 1:03d}"
+            
+            # Записуємо в Google Sheets
+            if sheets_manager:
+                sheets_manager.add_sale(
+                    sale_id,
+                    product.get("Название", "N/A"),
+                    quantity,
+                    product.get("Цена USD", 0),
+                    "Давид Джонсон"
+                )
+                logger.info(f"✅ Продаж додана: {product.get('Название', 'N/A')} x{quantity}")
+            
+            # Перезавантажуємо дані
+            reload_sales()
+            
+            await update.message.reply_text(
+                f"✅ Продаж додана!\n\n"
+                f"Товар: {product.get('Название', 'N/A')}\n"
+                f"Кількість: {quantity}\n"
+                f"Сума: ${product.get('Цена USD', 0) * quantity}",
+                reply_markup=get_main_menu_keyboard()
+            )
+            context.user_data["waiting_for"] = None
+        except ValueError:
+            await update.message.reply_text("❌ Введіть число!")
+        except Exception as e:
+            logger.error(f"Error adding sale: {e}")
+            await update.message.reply_text(f"❌ Помилка: {str(e)}")
 
 def reload_customers():
     """Перезавантажити клієнтів з Google Sheets"""
     global CUSTOMERS_DB
     if sheets_manager:
-        CUSTOMERS_DB = sheets_manager.get_customers()
+        try:
+            CUSTOMERS_DB = sheets_manager.get_customers()
+        except Exception as e:
+            logger.error(f"Error reloading customers: {e}")
 
 def reload_products():
     """Перезавантажити товари з Google Sheets"""
     global PRODUCTS_DB
     if sheets_manager:
-        PRODUCTS_DB = sheets_manager.get_products()
+        try:
+            PRODUCTS_DB = sheets_manager.get_products()
+        except Exception as e:
+            logger.error(f"Error reloading products: {e}")
 
 def reload_sales():
     """Перезавантажити продажі з Google Sheets"""
     global SALES_DB
     if sheets_manager:
-        SALES_DB = sheets_manager.get_sales()
+        try:
+            SALES_DB = sheets_manager.get_sales()
+        except Exception as e:
+            logger.error(f"Error reloading sales: {e}")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обробка помилок"""
@@ -451,49 +419,17 @@ async def startup():
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Conversation handler для додавання клієнта
-    conv_handler_customer = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_callback, pattern="^add_customer$")],
-        states={
-            ADD_CUSTOMER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_customer_name)],
-            ADD_CUSTOMER_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_customer_email)],
-            ADD_CUSTOMER_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_customer_phone)],
-            ADD_CUSTOMER_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_customer_city)],
-        },
-        fallbacks=[CommandHandler("start", start)],
-    )
-    
-    # Conversation handler для додавання товара
-    conv_handler_product = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_callback, pattern="^add_product$")],
-        states={
-            ADD_PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_name)],
-            ADD_PRODUCT_PRICE_USD: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_price)],
-            ADD_PRODUCT_STOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_stock)],
-        },
-        fallbacks=[CommandHandler("start", start)],
-    )
-    
-    # Conversation handler для додавання продажи
-    conv_handler_sale = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_callback, pattern="^add_sale$")],
-        states={
-            ADD_SALE_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_sale_quantity)],
-        },
-        fallbacks=[CommandHandler("start", start)],
-    )
-    
     # Обробники команд
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(conv_handler_customer)
-    application.add_handler(conv_handler_product)
-    application.add_handler(conv_handler_sale)
     
     # Обробник текстових повідомлень
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     
     # Обробник кнопок
     application.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Обробник меню
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
     
     # Обробник помилок
     application.add_error_handler(error_handler)

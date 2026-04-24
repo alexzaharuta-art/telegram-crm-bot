@@ -2,7 +2,7 @@
 """
 RetailCRM Telegram Bot - Українська версія
 Повнофункціональна CRM система для управління магазином
-Розгорнуто на Railway з FastAPI webhook
+Розгорнуто на Railway з Google Sheets синхронізацією
 """
 
 import os
@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 import asyncio
+from google_sheets_integration import init_sheets_manager, get_sheets_manager
 
 # Налаштування логування
 logging.basicConfig(
@@ -26,10 +27,10 @@ logger = logging.getLogger(__name__)
 
 # Константи - читаємо з змінних оточення
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8747572018:AAFEFoum-bcnSCCTuEwJkKBow9tR0DfcIc0")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-project.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-key")
 PORT = int(os.getenv("PORT", 8000))
 WEBHOOK_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "1D7jcMc-xDzdd1r5rFYlsNrYeSblwmK-HDgvjIstOsK4")
+GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
 
 # Дані для демонстрації (локальне сховище)
 USERS_DB = {
@@ -39,27 +40,8 @@ USERS_DB = {
     "anna@company.com": {"name": "Анна Смирнова", "role": "менеджер", "salary_base": 450, "commission": 4},
 }
 
-CUSTOMERS_DB = [
-    {"id": "C001", "name": "Іван Петров", "email": "ivan@example.com", "phone": "+380-50-1234567", "city": "Київ"},
-    {"id": "C002", "name": "Марія Сидорова", "email": "maria@example.com", "phone": "+380-50-7654321", "city": "Харків"},
-    {"id": "C003", "name": "Петро Іванов", "email": "petr@example.com", "phone": "+380-50-9876543", "city": "Львів"},
-    {"id": "C004", "name": "Анна Смирнова", "email": "anna@example.com", "phone": "+380-50-5555555", "city": "Одеса"},
-    {"id": "C005", "name": "Сергій Козлов", "email": "sergey@example.com", "phone": "+380-50-3333333", "city": "Дніпро"},
-]
-
-PRODUCTS_DB = [
-    {"id": "P001", "name": "iPhone 16 128GB", "price_usd": 799, "price_uah": 31960, "stock": 15, "min_stock": 5},
-    {"id": "P002", "name": "iPhone 16 Pro 256GB", "price_usd": 1280, "price_uah": 51200, "stock": 8, "min_stock": 5},
-    {"id": "P003", "name": "iPad Pro 12.9\"", "price_usd": 1600, "price_uah": 64000, "stock": 12, "min_stock": 5},
-    {"id": "P004", "name": "AirPods Pro 2", "price_usd": 320, "price_uah": 12800, "stock": 25, "min_stock": 10},
-    {"id": "P005", "name": "Apple Watch Series 9", "price_usd": 399, "price_uah": 15960, "stock": 12, "min_stock": 5},
-    {"id": "P006", "name": "MacBook Air M3", "price_usd": 1199, "price_uah": 47960, "stock": 3, "min_stock": 2},
-    {"id": "P007", "name": "iPad Air 11\"", "price_usd": 960, "price_uah": 38400, "stock": 10, "min_stock": 5},
-    {"id": "P008", "name": "iPad Mini 7\"", "price_usd": 499, "price_uah": 19960, "stock": 8, "min_stock": 3},
-    {"id": "P009", "name": "Apple TV 4K", "price_usd": 129, "price_uah": 5160, "stock": 20, "min_stock": 10},
-    {"id": "P010", "name": "iPhone 16 Pro Max", "price_usd": 1599, "price_uah": 63960, "stock": 5, "min_stock": 3},
-]
-
+CUSTOMERS_DB = []
+PRODUCTS_DB = []
 SALES_DB = []
 OPERATION_HISTORY = []
 
@@ -72,15 +54,7 @@ app = FastAPI()
 
 # Telegram application (глобальна)
 application = None
-
-def log_operation(user_email: str, operation: str, details: str):
-    """Записує операцію в історію"""
-    OPERATION_HISTORY.append({
-        "timestamp": datetime.now().isoformat(),
-        "user": user_email,
-        "operation": operation,
-        "details": details
-    })
+sheets_manager = None
 
 def get_main_menu_keyboard():
     """Повертає клавіатуру головного меню"""
@@ -130,11 +104,23 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
     
     elif text == "📦 Склад":
+        # Завантажуємо товари з Google Sheets
+        if sheets_manager:
+            PRODUCTS_DB.clear()
+            products = sheets_manager.get_products()
+            PRODUCTS_DB.extend(products)
+        
         stock_info = "📦 Статус складу:\n\n"
-        for product in PRODUCTS_DB:
-            status = "✅ OK" if product["stock"] > product["min_stock"] else "⚠️ Низько"
-            stock_info += f"{product['name']}\n"
-            stock_info += f"  Запас: {product['stock']} шт. | {status}\n"
+        if PRODUCTS_DB:
+            for product in PRODUCTS_DB:
+                name = product.get("Название", "N/A")
+                stock = product.get("Запас", 0)
+                min_stock = product.get("Минимум", 5)
+                status = "✅ OK" if stock > min_stock else "⚠️ Низко"
+                stock_info += f"{name}\n"
+                stock_info += f"  Запас: {stock} шт. | {status}\n"
+        else:
+            stock_info = "📦 Складу порожній"
         
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
         await update.message.reply_text(stock_info, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -142,7 +128,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     elif text == "💰 Зарплата":
         salary_info = "💰 Розрахунок зарплати (квітень 2026):\n\n"
         for email, user_data in USERS_DB.items():
-            user_sales = sum(s["amount_usd"] for s in SALES_DB if s["seller_email"] == email)
+            user_sales = sum(float(s.get("Цена USD", 0)) for s in SALES_DB if s.get("Продавец", "") == user_data["name"])
             commission = (user_sales * user_data["commission"]) / 100
             total = user_data["salary_base"] + commission
             
@@ -156,13 +142,13 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     
     elif text == "📊 Звіти":
         total_sales = len(SALES_DB)
-        total_revenue = sum(s["amount_usd"] for s in SALES_DB)
+        total_revenue = sum(float(s.get("Цена USD", 0)) for s in SALES_DB)
         
         report = f"📊 Звіти:\n\n"
         report += f"📈 Всього продаж: {total_sales}\n"
         report += f"💵 Загальний дохід: ${total_revenue:.2f}\n"
         report += f"👥 Активних клієнтів: {len(CUSTOMERS_DB)}\n"
-        report += f"📦 Товарів на складі: {sum(p['stock'] for p in PRODUCTS_DB)}\n"
+        report += f"📦 Товарів на складі: {sum(int(p.get('Запас', 0)) for p in PRODUCTS_DB)}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
         await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -195,12 +181,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text("Оберіть дію:", reply_markup=get_main_menu_keyboard())
     
     elif query.data == "list_customers":
+        # Завантажуємо клієнтів з Google Sheets
+        if sheets_manager:
+            CUSTOMERS_DB.clear()
+            customers = sheets_manager.get_customers()
+            CUSTOMERS_DB.extend(customers)
+        
         customers_text = "👥 Список клієнтів:\n\n"
-        for customer in CUSTOMERS_DB:
-            customers_text += f"👤 {customer['name']}\n"
-            customers_text += f"  Email: {customer['email']}\n"
-            customers_text += f"  Телефон: {customer['phone']}\n"
-            customers_text += f"  Місто: {customer['city']}\n\n"
+        if CUSTOMERS_DB:
+            for customer in CUSTOMERS_DB:
+                name = customer.get("Имя", "N/A")
+                email = customer.get("Email", "N/A")
+                phone = customer.get("Телефон", "N/A")
+                city = customer.get("Город", "N/A")
+                customers_text += f"👤 {name}\n"
+                customers_text += f"  Email: {email}\n"
+                customers_text += f"  Телефон: {phone}\n"
+                customers_text += f"  Місто: {city}\n\n"
+        else:
+            customers_text = "👥 Клієнтів немає"
         
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
         await query.edit_message_text(customers_text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -210,11 +209,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return CUSTOMER_NAME
     
     elif query.data == "add_sale":
+        # Завантажуємо товари з Google Sheets
+        if sheets_manager:
+            PRODUCTS_DB.clear()
+            products = sheets_manager.get_products()
+            PRODUCTS_DB.extend(products)
+        
         products_text = "🛍️ Оберіть товар:\n\n"
         keyboard = []
-        for product in PRODUCTS_DB:
-            products_text += f"{product['name']} - ${product['price_usd']}\n"
-            keyboard.append([InlineKeyboardButton(product['name'], callback_data=f"product_{product['id']}")])
+        if PRODUCTS_DB:
+            for product in PRODUCTS_DB:
+                name = product.get("Название", "N/A")
+                price = product.get("Цена USD", 0)
+                products_text += f"{name} - ${price}\n"
+                keyboard.append([InlineKeyboardButton(name, callback_data=f"product_{product.get('ID', 'unknown')}")])
+        else:
+            products_text = "🛍️ Товарів немає"
         
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_menu")])
         await query.edit_message_text(products_text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -234,13 +244,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(profile_text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data == "history":
-        history_text = "📝 Історія операцій (останні 5):\n\n"
-        for op in OPERATION_HISTORY[-5:]:
-            history_text += f"⏰ {op['timestamp']}\n"
-            history_text += f"👤 {op['user']}\n"
-            history_text += f"📌 {op['operation']}: {op['details']}\n\n"
+        # Завантажуємо історію з Google Sheets
+        if sheets_manager:
+            OPERATION_HISTORY.clear()
+            history = sheets_manager.get_sales()
+            OPERATION_HISTORY.extend(history)
         
-        if not OPERATION_HISTORY:
+        history_text = "📝 Історія операцій (останні 5):\n\n"
+        if OPERATION_HISTORY:
+            for op in OPERATION_HISTORY[-5:]:
+                history_text += f"⏰ {op.get('Дата/Время', 'N/A')}\n"
+                history_text += f"📌 {op.get('Операция', 'N/A')}: {op.get('Детали', 'N/A')}\n\n"
+        else:
             history_text = "📝 Історія операцій порожня"
         
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
@@ -248,12 +263,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     elif query.data.startswith("product_"):
         product_id = query.data.split("_")[1]
-        product = next((p for p in PRODUCTS_DB if p["id"] == product_id), None)
+        product = next((p for p in PRODUCTS_DB if p.get("ID") == product_id), None)
         
         if product:
             await query.edit_message_text(
-                f"Ви вибрали: {product['name']}\n"
-                f"Ціна: ${product['price_usd']}\n\n"
+                f"Ви вибрали: {product.get('Название', 'N/A')}\n"
+                f"Ціна: ${product.get('Цена USD', 0)}\n\n"
                 f"Введіть кількість:"
             )
             context.user_data["selected_product"] = product
@@ -280,12 +295,27 @@ async def webhook(request: Request):
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "ok", "bot": "running"}
+    return {"status": "ok", "bot": "running", "sheets": "connected" if sheets_manager else "disconnected"}
 
 @app.on_event("startup")
 async def startup():
     """Запуск бота при старті FastAPI"""
-    global application
+    global application, sheets_manager
+    
+    # Ініціалізуємо Google Sheets
+    try:
+        if GOOGLE_SHEETS_CREDENTIALS:
+            sheets_manager = init_sheets_manager(GOOGLE_SHEETS_ID, GOOGLE_SHEETS_CREDENTIALS)
+            logger.info("✅ Google Sheets підключен")
+            
+            # Завантажуємо дані з Google Sheets
+            CUSTOMERS_DB.extend(sheets_manager.get_customers())
+            PRODUCTS_DB.extend(sheets_manager.get_products())
+            SALES_DB.extend(sheets_manager.get_sales())
+        else:
+            logger.warning("⚠️ GOOGLE_SHEETS_CREDENTIALS не встановлено")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при ініціалізації Google Sheets: {e}")
     
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -305,14 +335,13 @@ async def startup():
     await application.initialize()
     await application.start()
     
-    # Встановлення webhook
+    # Встановлення webhook або запуск polling
     if WEBHOOK_URL:
         webhook_url = f"https://{WEBHOOK_URL}/webhook"
         await application.bot.set_webhook(webhook_url)
         logger.info(f"✅ Webhook встановлено: {webhook_url}")
     else:
         logger.info("⚠️ RAILWAY_PUBLIC_DOMAIN не встановлено, використовуємо polling")
-        # Запуск polling в фоновому потоці
         asyncio.create_task(application.updater.start_polling(allowed_updates=Update.ALL_TYPES))
     
     logger.info("🤖 RetailCRM Telegram Bot запущено!")

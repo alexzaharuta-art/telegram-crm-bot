@@ -2,6 +2,7 @@
 """
 RetailCRM Telegram Bot - Українська версія
 Повнофункціональна CRM система для управління магазином
+Розгорнуто на Railway з webhook підтримкою
 """
 
 import os
@@ -25,6 +26,8 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8747572018:AAFEFoum-bcnSCCTuEwJkKBow9tR0DfcIc0")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-project.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-key")
+PORT = int(os.getenv("PORT", 8080))
+RAILWAY_STATIC_URL = os.getenv("RAILWAY_STATIC_URL", "")
 
 # Дані для демонстрації (локальне сховище)
 USERS_DB = {
@@ -256,6 +259,23 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     """Обробка помилок"""
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
+async def post_init(app: Application) -> None:
+    """Налаштування webhook після запуску"""
+    try:
+        # Отримуємо публічний URL з Railway
+        if RAILWAY_STATIC_URL:
+            webhook_url = f"{RAILWAY_STATIC_URL}/webhook"
+        else:
+            # Якщо RAILWAY_STATIC_URL не встановлено, використовуємо polling
+            logger.info("RAILWAY_STATIC_URL не встановлено, використовуємо polling")
+            return
+        
+        # Встановлюємо webhook
+        await app.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook встановлено: {webhook_url}")
+    except Exception as e:
+        logger.error(f"Помилка при встановленні webhook: {e}")
+
 def main():
     """Запуск бота"""
     app = Application.builder().token(BOT_TOKEN).build()
@@ -272,9 +292,14 @@ def main():
     # Обробник помилок
     app.add_error_handler(error_handler)
     
+    # Post-init для webhook
+    app.post_init = post_init
+    
     # Запуск бота
     print("🤖 RetailCRM Telegram Bot запущено...")
     print(f"📱 Бот готовий до роботи!")
+    
+    # Використовуємо polling (простіше для Railway)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

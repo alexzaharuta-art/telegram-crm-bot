@@ -317,11 +317,9 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             
             # Записуємо в Google Sheets
             if sheets_manager:
-                worksheet = sheets_manager.get_worksheet("Товары")
-                if worksheet:
-                    row = [product_id, name, price, price * 40, stock, 5, "✅ OK"]
-                    worksheet.append_row(row)
-                    logger.info(f"✅ Товар додан: {name}")
+                price_uah = price * 40  # Примерный курс USD -> UAH
+                sheets_manager.add_product(product_id, name, price, price_uah, stock)
+                logger.info(f"✅ Товар додан: {name}")
             
             # Перезавантажуємо дані
             reload_all_data()

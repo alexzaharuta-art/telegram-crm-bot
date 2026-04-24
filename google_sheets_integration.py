@@ -83,6 +83,31 @@ class GoogleSheetsManager:
             logger.error(f"Ошибка при добавлении клиента: {e}")
             return False
     
+    def add_product(self, product_id: str, name: str, price_usd: float, 
+                    price_uah: float, stock: int) -> bool:
+        """Добавить товар в Google Sheets (вкладка Склад)"""
+        try:
+            worksheet = self.get_worksheet("Склад")
+            if not worksheet:
+                return False
+            
+            row = [
+                product_id,
+                name,
+                "Товар",
+                price_usd,
+                price_uah,
+                stock,
+                5,
+                "✅ OK"
+            ]
+            worksheet.append_row(row)
+            logger.info(f"✅ Товар добавлен: {name}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении товара: {e}")
+            return False
+    
     def add_sale(self, sale_id: str, product_name: str, quantity: int, 
                  price_usd: float, seller: str) -> bool:
         """Добавить продажу в Google Sheets"""
@@ -145,7 +170,7 @@ class GoogleSheetsManager:
     def get_products(self) -> List[Dict]:
         """Получить все товары из Google Sheets"""
         try:
-            worksheet = self.get_worksheet("Товары")
+            worksheet = self.get_worksheet("Склад")
             if not worksheet:
                 return []
             
@@ -187,7 +212,7 @@ class GoogleSheetsManager:
     def update_product_stock(self, product_id: str, new_stock: int) -> bool:
         """Обновить запас товара"""
         try:
-            worksheet = self.get_worksheet("Товары")
+            worksheet = self.get_worksheet("Склад")
             if not worksheet:
                 return False
             
@@ -208,7 +233,7 @@ class GoogleSheetsManager:
     def get_salary_report(self) -> Dict:
         """Получить отчет по зарплате"""
         try:
-            worksheet = self.get_worksheet("Отчеты")
+            worksheet = self.get_worksheet("Зарплата")
             if not worksheet:
                 return {}
             

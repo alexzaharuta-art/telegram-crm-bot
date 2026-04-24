@@ -2,6 +2,7 @@
 """
 RetailCRM Telegram Bot - Українська версія
 Повнофункціональна CRM система з двосторонньою синхронізацією Google Sheets
+Синхронізація з усіма вкладками: Клієнти, Товари, Продажі, Склад, Зарплата, Звіти
 """
 
 import os
@@ -30,22 +31,19 @@ WEBHOOK_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
 GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "1D7jcMc-xDzdd1r5rFYlsNrYeSblwmK-HDgvjIstOsK4")
 GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
 
-# Дані
-USERS_DB = {
-    "david@company.com": {"name": "Давид Джонсон", "role": "менеджер", "salary_base": 500, "commission": 5},
-    "sarah@company.com": {"name": "Сара Уільямс", "role": "керівник", "salary_base": 800, "commission": 3},
-    "michael@company.com": {"name": "Майкл Браун", "role": "менеджер", "salary_base": 400, "commission": 5},
-    "anna@company.com": {"name": "Анна Смирнова", "role": "менеджер", "salary_base": 450, "commission": 4},
-}
-
-CUSTOMERS_DB = []
-PRODUCTS_DB = []
-SALES_DB = []
-
 # FastAPI app
 app = FastAPI()
 application = None
 sheets_manager = None
+
+# Кеш для даних
+cache = {
+    "customers": [],
+    "products": [],
+    "sales": [],
+    "employees": [],
+    "last_update": None
+}
 
 def get_main_menu_keyboard():
     """Повертає клавіатуру головного меню"""
@@ -56,9 +54,24 @@ def get_main_menu_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def reload_all_data():
+    """Перезавантажити всі дані з Google Sheets"""
+    global sheets_manager, cache
+    if sheets_manager:
+        try:
+            cache["customers"] = sheets_manager.get_customers()
+            cache["products"] = sheets_manager.get_products()
+            cache["sales"] = sheets_manager.get_sales()
+            cache["employees"] = sheets_manager.get_employees()
+            cache["last_update"] = datetime.now()
+            logger.info(f"✅ Дані оновлені: {len(cache['customers'])} клієнтів, {len(cache['products'])} товарів, {len(cache['sales'])} продаж")
+        except Exception as e:
+            logger.error(f"❌ Помилка при оновленні даних: {e}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /start"""
     user = update.effective_user
+    reload_all_data()
     await update.message.reply_text(
         f"👋 Привіт, {user.first_name}!\n\n"
         f"Ласкаво просимо до RetailCRM 🏪\n\n"
@@ -95,43 +108,48 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("📦 Управління товарами:", reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif text == "💰 Зарплата":
-        reload_sales()
+        reload_all_data()
         salary_info = "💰 Розрахунок зарплати (квітень 2026):\n\n"
-        for email, user_data in USERS_DB.items():
-            user_sales = sum(float(s.get("Цена USD", 0)) * int(s.get("Количество", 1)) 
-                           for s in SALES_DB if s.get("Продавец", "") == user_data["name"])
-            commission = (user_sales * user_data["commission"]) / 100
-            total = user_data["salary_base"] + commission
+        
+        for employee in cache["employees"]:
+            name = employee.get("Имя", "N/A")
+            salary_base = float(employee.get("Оклад", 0))
+            commission_percent = float(employee.get("Комиссия", 0))
             
-            salary_info += f"👤 {user_data['name']}\n"
-            salary_info += f"  Оклад: ${user_data['salary_base']}\n"
-            salary_info += f"  Комісія ({user_data['commission']}%): ${commission:.2f}\n"
+            # Рахуємо комісію з продаж цього працівника
+            employee_sales = [s for s in cache["sales"] if s.get("Продавец", "") == name]
+            commission = sum(float(s.get("Сумма", 0)) * commission_percent / 100 for s in employee_sales)
+            total = salary_base + commission
+            
+            salary_info += f"👤 {name}\n"
+            salary_info += f"  Оклад: ${salary_base}\n"
+            salary_info += f"  Комісія ({commission_percent}%): ${commission:.2f}\n"
             salary_info += f"  Всього: ${total:.2f}\n\n"
         
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
         await update.message.reply_text(salary_info, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif text == "📊 Звіти":
-        reload_sales()
-        reload_customers()
-        reload_products()
+        reload_all_data()
         
-        total_sales = len(SALES_DB)
-        total_revenue = sum(float(s.get("Цена USD", 0)) * int(s.get("Количество", 1)) for s in SALES_DB)
+        total_sales = len(cache["sales"])
+        total_revenue = sum(float(s.get("Сумма", 0)) for s in cache["sales"])
+        total_stock = sum(int(p.get("Запас", 0)) for p in cache["products"])
         
         report = f"📊 Звіти:\n\n"
         report += f"📈 Всього продаж: {total_sales}\n"
         report += f"💵 Загальний дохід: ${total_revenue:.2f}\n"
-        report += f"👥 Активних клієнтів: {len(CUSTOMERS_DB)}\n"
-        report += f"📦 Товарів на складі: {sum(int(p.get('Запас', 0)) for p in PRODUCTS_DB)}\n"
+        report += f"👥 Активних клієнтів: {len(cache['customers'])}\n"
+        report += f"📦 Товарів на складі: {total_stock} шт.\n"
+        report += f"👨‍💼 Сотрудників: {len(cache['employees'])}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
         await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif text == "⚙️ Налаштування":
         keyboard = [
-            [InlineKeyboardButton("👤 Мій профіль", callback_data="profile")],
             [InlineKeyboardButton("🔄 Оновити дані", callback_data="refresh_data")],
+            [InlineKeyboardButton("👤 Мій профіль", callback_data="profile")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]
         ]
         await update.message.reply_text("⚙️ Налаштування:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -163,14 +181,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data["waiting_for"] = "product"
     
     elif query.data == "add_sale_form":
-        reload_products()
-        if not PRODUCTS_DB:
+        reload_all_data()
+        if not cache["products"]:
             await query.edit_message_text("❌ Товарів немає. Спочатку додайте товари!")
             return
         
         products_text = "🛍️ Оберіть товар:\n\n"
         keyboard = []
-        for i, product in enumerate(PRODUCTS_DB):
+        for i, product in enumerate(cache["products"]):
             name = product.get("Название", "N/A")
             price = product.get("Цена USD", 0)
             products_text += f"{i+1}. {name} - ${price}\n"
@@ -181,8 +199,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     elif query.data.startswith("select_product_"):
         product_idx = int(query.data.split("_")[2])
-        if product_idx < len(PRODUCTS_DB):
-            product = PRODUCTS_DB[product_idx]
+        if product_idx < len(cache["products"]):
+            product = cache["products"][product_idx]
             await query.edit_message_text(
                 f"📝 Введіть кількість для товара:\n\n"
                 f"<b>{product.get('Название', 'N/A')}</b>\n"
@@ -192,10 +210,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             context.user_data["selected_product_idx"] = product_idx
     
     elif query.data == "list_customers":
-        reload_customers()
+        reload_all_data()
         customers_text = "👥 Список клієнтів:\n\n"
-        if CUSTOMERS_DB:
-            for customer in CUSTOMERS_DB:
+        if cache["customers"]:
+            for customer in cache["customers"]:
                 name = customer.get("Имя", "N/A")
                 email = customer.get("Email", "N/A")
                 phone = customer.get("Телефон", "N/A")
@@ -208,10 +226,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(customers_text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data == "list_products":
-        reload_products()
+        reload_all_data()
         products_text = "📦 Список товарів:\n\n"
-        if PRODUCTS_DB:
-            for product in PRODUCTS_DB:
+        if cache["products"]:
+            for product in cache["products"]:
                 name = product.get("Название", "N/A")
                 price = product.get("Цена USD", 0)
                 stock = product.get("Запас", 0)
@@ -222,20 +240,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
         await query.edit_message_text(products_text, reply_markup=InlineKeyboardMarkup(keyboard))
     
+    elif query.data == "refresh_data":
+        reload_all_data()
+        await query.edit_message_text("✅ Дані оновлені з Google Sheets!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]))
+    
     elif query.data == "profile":
         user_email = "david@company.com"
-        if user_email in USERS_DB:
-            user_data = USERS_DB[user_email]
-            profile_text = f"👤 Мій профіль:\n\nІм'я: {user_data['name']}\nEmail: {user_email}\nПосада: {user_data['role']}\nОклад: ${user_data['salary_base']}\nКомісія: {user_data['commission']}%"
-        
+        profile_text = f"👤 Мій профіль:\n\nEmail: {user_email}\nПосада: менеджер\nОклад: $500\nКомісія: 5%"
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
         await query.edit_message_text(profile_text, reply_markup=InlineKeyboardMarkup(keyboard))
     
-    elif query.data == "refresh_data":
-        reload_customers()
-        reload_products()
-        reload_sales()
-        await query.edit_message_text("✅ Дані оновлені з Google Sheets!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]))
+    elif query.data == "my_sales":
+        reload_all_data()
+        my_sales_text = "🛍️ Мої продажі:\n\n"
+        user_sales = [s for s in cache["sales"] if s.get("Продавец", "") == "Давид Джонсон"]
+        if user_sales:
+            for sale in user_sales:
+                product = sale.get("Название", "N/A")
+                quantity = sale.get("Количество", 0)
+                amount = sale.get("Сумма", 0)
+                my_sales_text += f"🛍️ {product}\n  Кількість: {quantity}\n  Сума: ${amount}\n\n"
+        else:
+            my_sales_text = "🛍️ Продаж немає"
+        
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_menu")]]
+        await query.edit_message_text(my_sales_text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обробка текстового вводу для форм"""
@@ -251,7 +280,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 return
             
             name, email, phone, city = parts
-            customer_id = f"C{len(CUSTOMERS_DB) + 1:03d}"
+            customer_id = f"C{len(cache['customers']) + 1:03d}"
             
             # Записуємо в Google Sheets
             if sheets_manager:
@@ -259,7 +288,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 logger.info(f"✅ Клієнт додан: {name}")
             
             # Перезавантажуємо дані
-            reload_customers()
+            reload_all_data()
             
             await update.message.reply_text(
                 f"✅ Клієнт додан!\n\n"
@@ -284,7 +313,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             name, price_str, stock_str = parts
             price = float(price_str)
             stock = int(stock_str)
-            product_id = f"P{len(PRODUCTS_DB) + 1:03d}"
+            product_id = f"P{len(cache['products']) + 1:03d}"
             
             # Записуємо в Google Sheets
             if sheets_manager:
@@ -295,7 +324,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     logger.info(f"✅ Товар додан: {name}")
             
             # Перезавантажуємо дані
-            reload_products()
+            reload_all_data()
             
             await update.message.reply_text(
                 f"✅ Товар додан!\n\n"
@@ -314,12 +343,12 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             quantity = int(text)
             product_idx = context.user_data.get("selected_product_idx")
             
-            if product_idx is None or product_idx >= len(PRODUCTS_DB):
+            if product_idx is None or product_idx >= len(cache["products"]):
                 await update.message.reply_text("❌ Товар не знайдений!")
                 return
             
-            product = PRODUCTS_DB[product_idx]
-            sale_id = f"S{len(SALES_DB) + 1:03d}"
+            product = cache["products"][product_idx]
+            sale_id = f"S{len(cache['sales']) + 1:03d}"
             
             # Записуємо в Google Sheets
             if sheets_manager:
@@ -327,19 +356,19 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     sale_id,
                     product.get("Название", "N/A"),
                     quantity,
-                    product.get("Цена USD", 0),
+                    float(product.get("Цена USD", 0)),
                     "Давид Джонсон"
                 )
                 logger.info(f"✅ Продаж додана: {product.get('Название', 'N/A')} x{quantity}")
             
             # Перезавантажуємо дані
-            reload_sales()
+            reload_all_data()
             
             await update.message.reply_text(
                 f"✅ Продаж додана!\n\n"
                 f"Товар: {product.get('Название', 'N/A')}\n"
                 f"Кількість: {quantity}\n"
-                f"Сума: ${product.get('Цена USD', 0) * quantity}",
+                f"Сума: ${float(product.get('Цена USD', 0)) * quantity}",
                 reply_markup=get_main_menu_keyboard()
             )
             context.user_data["waiting_for"] = None
@@ -348,33 +377,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception as e:
             logger.error(f"Error adding sale: {e}")
             await update.message.reply_text(f"❌ Помилка: {str(e)}")
-
-def reload_customers():
-    """Перезавантажити клієнтів з Google Sheets"""
-    global CUSTOMERS_DB
-    if sheets_manager:
-        try:
-            CUSTOMERS_DB = sheets_manager.get_customers()
-        except Exception as e:
-            logger.error(f"Error reloading customers: {e}")
-
-def reload_products():
-    """Перезавантажити товари з Google Sheets"""
-    global PRODUCTS_DB
-    if sheets_manager:
-        try:
-            PRODUCTS_DB = sheets_manager.get_products()
-        except Exception as e:
-            logger.error(f"Error reloading products: {e}")
-
-def reload_sales():
-    """Перезавантажити продажі з Google Sheets"""
-    global SALES_DB
-    if sheets_manager:
-        try:
-            SALES_DB = sheets_manager.get_sales()
-        except Exception as e:
-            logger.error(f"Error reloading sales: {e}")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обробка помилок"""
@@ -395,7 +397,17 @@ async def webhook(request: Request):
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "ok", "bot": "running", "sheets": "connected" if sheets_manager else "disconnected"}
+    return {
+        "status": "ok",
+        "bot": "running",
+        "sheets": "connected" if sheets_manager else "disconnected",
+        "cache": {
+            "customers": len(cache["customers"]),
+            "products": len(cache["products"]),
+            "sales": len(cache["sales"]),
+            "employees": len(cache["employees"])
+        }
+    }
 
 @app.on_event("startup")
 async def startup():
@@ -409,9 +421,7 @@ async def startup():
             logger.info("✅ Google Sheets підключен")
             
             # Завантажуємо дані з Google Sheets
-            reload_customers()
-            reload_products()
-            reload_sales()
+            reload_all_data()
         else:
             logger.warning("⚠️ GOOGLE_SHEETS_CREDENTIALS не встановлено")
     except Exception as e:
@@ -422,7 +432,7 @@ async def startup():
     # Обробники команд
     application.add_handler(CommandHandler("start", start))
     
-    # Обробник текстових повідомлень
+    # Обробник текстових повідомлень для форм
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     
     # Обробник кнопок
